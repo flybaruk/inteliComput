@@ -52,22 +52,32 @@ class DefaultPlayer(BasePlayer):
                     best_dist = d
                     best = pkg
             return best
+        
+        #MUDANÇA REALIZADA AQUI
+        elif self.cargo > 0 and world.goals:
+            best_score=float('-inf')
+            best_goal=None
+
+            for goal in world.goals:
+                gx, gy = goal["pos"]
+                dist = abs(gx - sx) + abs(gy-sy)
+                age = current_steps - goal["created_at"]
+                remaining_time = goal["priority"] - age
+
+                # Quanto menor o tempo restante, mais urgente (negativo = já está atrasado)
+                # Usamos uma função de escore balanceando urgência e distância
+                # Aqui o peso do tempo é mais importante do que a distância
+                # (Aqui posso ajustar o peso)
+                score = (-remaining_time * 2) - dist
+
+                if score > best_score:
+                    best_score = score
+                    best_goal = goal["pos"]
+
+                return best_goal
         else:
-            # Se estiver carregando ou não houver mais pacotes, vai para a meta de entrega (se existir)
-            if world.goals:
-                best = None
-                best_dist = float('inf')
-                for goal in world.goals:
-                    gx, gy = goal["pos"]
-                    d = abs(gx - sx) + abs(gy - sy)
-                    if d < best_dist:
-                        best_dist = d
-                        best = goal["pos"]
-                
-                steps_for_deadline = self.get_remaining_steps(goal, current_steps)    
-                return best
-            else:
-                return None
+            return None
+
 
 # ==========================
 # CLASSE WORLD (MUNDO)
@@ -240,6 +250,7 @@ class Maze:
         self.delay = 100  # milissegundos entre movimentos
         self.path = []
         self.num_deliveries = 0  # contagem de entregas realizadas
+        self.initial_wait_steps = 10 #Adicionei o delay para começar a se mexer, acredito que vai ajudar
 
         # Spawn de metas (goals) ao longo do tempo:
         # 2 metas iniciais no passo 0
@@ -333,9 +344,14 @@ class Maze:
     def game_loop(self):
         # O jogo termina quando o número de entregas realizadas é igual ao total de itens.
         while self.running:
-            if self.num_deliveries >= self.world.total_items:
-                self.running = False
-                break
+            if self.initial_wait_steps > 0:
+                print(f"Aguardando início: {self.initial_wait_steps} passos restantes")
+                self.initial_wait_steps -= 1
+                self.idle_tick()  # passo ocioso
+                if self.num_deliveries >= self.world.total_items:
+                    self.running = False
+                    break
+                continue
 
             # Spawns podem ocorrer antes mesmo de escolher alvo
             self.maybe_spawn_goal()
