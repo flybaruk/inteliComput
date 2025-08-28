@@ -142,7 +142,7 @@ class World:
         self.ground_color = (255, 255, 255)
         self.player_color = (0, 255, 0)
         self.path_color = (200, 200, 0)
-
+#t
     def generate_obstacles(self):
         """
         Gera obstáculos com sensação de linha de montagem:
