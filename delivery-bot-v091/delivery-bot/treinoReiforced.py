@@ -5,7 +5,6 @@ import sys
 import argparse
 from abc import ABC, abstractmethod
 
-
 # ==========================
 # CLASSES DE PLAYER
 # ==========================
@@ -78,7 +77,6 @@ class DefaultPlayer(BasePlayer):
                 return best_goal
         else:
             return None
-
 
 # ==========================
 # CLASSE WORLD (MUNDO)
@@ -251,7 +249,6 @@ class Maze:
         self.delay = 100  # milissegundos entre movimentos
         self.path = []
         self.num_deliveries = 0  # contagem de entregas realizadas
-        self.initial_wait_steps = 5 #Adicionei o delay para começar a se mexer, acredito que vai ajudar
 
         # Spawn de metas (goals) ao longo do tempo:
         # 2 metas iniciais no passo 0
@@ -345,17 +342,9 @@ class Maze:
     def game_loop(self):
         # O jogo termina quando o número de entregas realizadas é igual ao total de itens.
         while self.running:
-
-            #condição de esperar 5 segundos para começar a se mover
-            if self.initial_wait_steps > 0:
-                print(f"Aguardando início: {self.initial_wait_steps} passos restantes")
-                self.initial_wait_steps -= 1
-                self.idle_tick()  # passo ocioso
-                continue
-
             if self.num_deliveries >= self.world.total_items:
-                    self.running = False
-                    break
+                self.running = False
+                break
 
             # Spawns podem ocorrer antes mesmo de escolher alvo
             self.maybe_spawn_goal()
