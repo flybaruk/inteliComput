@@ -25,58 +25,133 @@ class BasePlayer(ABC):
         """
         pass
 
+#MUDEI A CLASSE TODA PRATICAMENTE
 class DefaultPlayer(BasePlayer):
+    """
+    Uma implementação de jogador mais inteligente que considera:
+    1. A distância real do caminho (usando A*) em vez da distância de Manhattan.
+    2. A urgência das entregas, priorizando aquelas próximas do prazo final.
+    3. Planeja a rota completa (pegar pacote -> entregar) ao decidir qual pacote coletar.
+    """
 
-    # Exemplo de como acessar prioridade de um objetivo
-    # Se idade > prioridade você começa a levar uma multa de -1 por passo por pacote
-    def get_remaining_steps(self, goal, current_steps):
-        prioridade = goal["priority"]
-        idade = current_steps - goal["created_at"]  # para medir o atraso    
-        print(f"Goal em {goal['pos']} tem prioridade {prioridade} e idade {idade}")    
-        return prioridade - idade
-    """
-    Implementação padrão do jogador.
-    Se não estiver carregando pacotes (cargo == 0), escolhe o pacote mais próximo.
-    Caso contrário, escolhe a meta (entrega) mais próxima.
-    """
+    def __init__(self, position):
+        super().__init__(position)
+        # Fator de ponderação: quão mais importante é evitar um passo de atraso em relação a um passo de viagem.
+        # Um valor alto fará o robô priorizar metas urgentes, mesmo que muito distantes.
+        self.LATENESS_PENALTY_MULTIPLIER = 10  
+
+    # =======================================================================================
+    # NOTE: Copiamos o A* e o heuristic para dentro da classe do jogador.
+    # Isso torna a classe autossuficiente e capaz de calcular os caminhos reais
+    # para tomar suas decisões, sem precisar de acesso externo à classe Maze.
+    # =======================================================================================
+    def heuristic(self, a, b):
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    def astar(self, start, goal, world_map):
+        size = len(world_map)
+        neighbors = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        close_set = set()
+        came_from = {}
+        gscore = {tuple(start): 0}
+        fscore = {tuple(start): self.heuristic(start, goal)}
+        oheap = []
+        heapq.heappush(oheap, (fscore[tuple(start)], tuple(start)))
+        while oheap:
+            current = heapq.heappop(oheap)[1]
+            if list(current) == goal:
+                data = []
+                while current in came_from:
+                    data.append(list(current))
+                    current = came_from[current]
+                return data # Retorna o caminho invertido (sem o ponto inicial)
+            close_set.add(current)
+            for dx, dy in neighbors:
+                neighbor = (current[0] + dx, current[1] + dy)
+                if not (0 <= neighbor[0] < size and 0 <= neighbor[1] < size and world_map[neighbor[1]][neighbor[0]] == 0):
+                    continue
+                
+                tentative_g = gscore[current] + 1
+                if neighbor in close_set and tentative_g >= gscore.get(neighbor, 0):
+                    continue
+
+                if tentative_g < gscore.get(neighbor, float('inf')) or neighbor not in [i[1] for i in oheap]:
+                    came_from[neighbor] = current
+                    gscore[neighbor] = tentative_g
+                    fscore[neighbor] = tentative_g + self.heuristic(neighbor, goal)
+                    heapq.heappush(oheap, (fscore[neighbor], neighbor))
+        return [] # Nenhum caminho encontrado
+
     def escolher_alvo(self, world, current_steps):
-        # Lógica simples 
-        sx, sy = self.position
-        # Se não estiver carregando pacote e houver pacotes disponíveis:
-        if self.cargo == 0 and world.packages:
-            best = None
-            best_dist = float('inf')
-            for pkg in world.packages:
-                d = abs(pkg[0] - sx) + abs(pkg[1] - sy)
-                if d < best_dist:
-                    best_dist = d
-                    best = pkg
-            return best
-        
-        #MUDANÇA REALIZADA AQUI
-        elif self.cargo > 0 and world.goals:
-            best_score=float('-inf')
-            best_goal=None
+        # Se estiver carregando um pacote, a única opção é entregá-lo.
+        # Vamos escolher a MELHOR meta para a entrega.
+        if self.cargo > 0:
+            best_goal_pos = None
+            best_goal_score = -float('inf')
 
             for goal in world.goals:
-                gx, gy = goal["pos"]
-                dist = abs(gx - sx) + abs(gy-sy)
-                age = current_steps - goal["created_at"]
-                remaining_time = goal["priority"] - age
+                path = self.astar(self.position, goal["pos"], world.map)
+                path_len = len(path)
+                if not path: # Se não houver caminho, ignore esta meta
+                    continue
 
-                # Quanto menor o tempo restante, mais urgente (negativo = já está atrasado)
-                # Usamos uma função de escore balanceando urgência e distância
-                # Aqui o peso do tempo é mais importante do que a distância
-                # (Aqui posso ajustar o peso)
-                score = (-remaining_time * 2) - dist
+                # Calcula o quão tarde chegaremos
+                arrival_step = current_steps + path_len
+                deadline_step = goal["created_at"] + goal["priority"]
+                
+                # 'lateness' será > 0 se chegarmos atrasados.
+                lateness = max(0, arrival_step - deadline_step)
 
-                if score > best_score:
-                    best_score = score
-                    best_goal = goal["pos"]
+                # A pontuação é uma combinação de penalidade por atraso e custo do caminho.
+                # Queremos maximizar essa pontuação (ou seja, minimizar o atraso e o caminho).
+                score = -lateness * self.LATENESS_PENALTY_MULTIPLIER - path_len
+                
+                if score > best_goal_score:
+                    best_goal_score = score
+                    best_goal_pos = goal["pos"]
+            
+            return best_goal_pos
 
-                return best_goal
-        else:
-            return None
+        # Se não estiver carregando e houver pacotes, decide qual a melhor ROTA (pegar + entregar).
+        elif self.cargo == 0 and world.packages and world.goals:
+            best_package_pos = None
+            best_trip_score = -float('inf')
+
+            # Avalia cada par (pacote, meta) para encontrar a melhor viagem completa
+            for pkg_pos in world.packages:
+                path_to_pkg = self.astar(self.position, pkg_pos, world.map)
+                path_to_pkg_len = len(path_to_pkg)
+                if not path_to_pkg:
+                    continue
+
+                # Após pegar o pacote, qual é a melhor meta para ir?
+                for goal in world.goals:
+                    path_from_pkg_to_goal = self.astar(pkg_pos, goal["pos"], world.map)
+                    path_from_pkg_to_goal_len = len(path_from_pkg_to_goal)
+                    if not path_from_pkg_to_goal:
+                        continue
+
+                    total_trip_len = path_to_pkg_len + path_from_pkg_to_goal_len
+                    
+                    # Calcula o atraso considerando a viagem completa
+                    arrival_step = current_steps + total_trip_len
+                    deadline_step = goal["created_at"] + goal["priority"]
+                    lateness = max(0, arrival_step - deadline_step)
+
+                    # A pontuação da viagem completa
+                    trip_score = -lateness * self.LATENESS_PENALTY_MULTIPLIER - total_trip_len
+
+                    if trip_score > best_trip_score:
+                        best_trip_score = trip_score
+                        # O alvo imediato é o pacote que inicia a melhor viagem
+                        best_package_pos = pkg_pos
+
+            return best_package_pos
+            
+        # Se não há nada a fazer
+        return None
+
+    
 
 # ==========================
 # CLASSE WORLD (MUNDO)

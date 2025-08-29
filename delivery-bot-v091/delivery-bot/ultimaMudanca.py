@@ -1,0 +1,547 @@
+import pygame
+import random
+import heapq
+import sys
+import argparse
+from abc import ABC, abstractmethod
+
+# ==========================
+# CLASSES DE PLAYER
+# ==========================
+class BasePlayer(ABC):
+    """
+    Classe base para o jogador (robô).
+    Para criar uma nova estratégia de jogador, basta herdar dessa classe e implementar o método escolher_alvo.
+    """
+    def __init__(self, position):
+        self.position = position  # Posição no grid [x, y]
+        self.cargo = 0            # Número de pacotes atualmente carregados
+
+    @abstractmethod
+    def escolher_alvo(self, world):
+        """
+        Retorna o alvo (posição) que o jogador deseja ir.
+        Recebe o objeto world para acesso a pacotes e metas.
+        """
+        pass
+
+#MUDEI A CLASSE TODA PRATICAMENTE
+class DefaultPlayer(BasePlayer):
+    """
+    Uma implementação de jogador ainda mais inteligente que considera:
+    1. A distância real do caminho (usando A*).
+    2. A urgência das entregas, priorizando aquelas próximas do prazo final.
+    3. Planeja a rota completa (pegar pacote -> entregar).
+    4. NOVO: Adiciona um bônus por terminar uma entrega perto de futuros pacotes (visão de futuro).
+    """
+
+    def __init__(self, position):
+        super().__init__(position)
+        # Fator de ponderação: quão mais importante é evitar um passo de atraso em relação a um passo de viagem.
+        self.LATENESS_PENALTY_MULTIPLIER = 10
+        
+        # NOVO PARÂMETRO: Peso do bônus de oportunidade.
+        # Um valor maior fará o robô priorizar rotas que o deixem perto de outros pacotes.
+        # Um bom valor para começar a testar é entre 50 e 200.
+        self.OPPORTUNITY_BONUS_WEIGHT = 100
+
+    # =======================================================================================
+    # NOTE: O A* e a heurística permanecem os mesmos, pois são essenciais para o cálculo
+    # dos caminhos reais.
+    # =======================================================================================
+    def heuristic(self, a, b):
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    def astar(self, start, goal, world_map):
+        size = len(world_map)
+        neighbors = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        close_set = set()
+        came_from = {}
+        gscore = {tuple(start): 0}
+        fscore = {tuple(start): self.heuristic(start, goal)}
+        oheap = []
+        heapq.heappush(oheap, (fscore[tuple(start)], tuple(start)))
+        while oheap:
+            current = heapq.heappop(oheap)[1]
+            if list(current) == goal:
+                data = []
+                while current in came_from:
+                    data.append(list(current))
+                    current = came_from[current]
+                return data # Retorna o caminho invertido (sem o ponto inicial)
+            close_set.add(current)
+            for dx, dy in neighbors:
+                neighbor = (current[0] + dx, current[1] + dy)
+                if not (0 <= neighbor[0] < size and 0 <= neighbor[1] < size and world_map[neighbor[1]][neighbor[0]] == 0):
+                    continue
+                
+                tentative_g = gscore[current] + 1
+                if neighbor in close_set and tentative_g >= gscore.get(neighbor, 0):
+                    continue
+
+                if tentative_g < gscore.get(neighbor, float('inf')) or neighbor not in [i[1] for i in oheap]:
+                    came_from[neighbor] = current
+                    gscore[neighbor] = tentative_g
+                    fscore[neighbor] = tentative_g + self.heuristic(neighbor, goal)
+                    heapq.heappush(oheap, (fscore[neighbor], neighbor))
+        return [] # Nenhum caminho encontrado
+
+    def escolher_alvo(self, world, current_steps):
+        # Se estiver carregando um pacote, a lógica não muda. O foco é entregar da melhor forma.
+        if self.cargo > 0:
+            best_goal_pos = None
+            best_goal_score = -float('inf')
+
+            for goal in world.goals:
+                path = self.astar(self.position, goal["pos"], world.map)
+                path_len = len(path)
+                if not path:
+                    continue
+
+                arrival_step = current_steps + path_len
+                deadline_step = goal["created_at"] + goal["priority"]
+                lateness = max(0, arrival_step - deadline_step)
+                score = -lateness * self.LATENESS_PENALTY_MULTIPLIER - path_len
+                
+                if score > best_goal_score:
+                    best_goal_score = score
+                    best_goal_pos = goal["pos"]
+            
+            return best_goal_pos
+
+        # Se não estiver carregando, a lógica de decisão agora inclui a visão de futuro.
+        elif self.cargo == 0 and world.packages and world.goals:
+            best_package_pos = None
+            best_trip_score = -float('inf')
+
+            for pkg_pos in world.packages:
+                path_to_pkg = self.astar(self.position, pkg_pos, world.map)
+                path_to_pkg_len = len(path_to_pkg)
+                if not path_to_pkg:
+                    continue
+
+                for goal in world.goals:
+                    path_from_pkg_to_goal = self.astar(pkg_pos, goal["pos"], world.map)
+                    path_from_pkg_to_goal_len = len(path_from_pkg_to_goal)
+                    if not path_from_pkg_to_goal:
+                        continue
+
+                    total_trip_len = path_to_pkg_len + path_from_pkg_to_goal_len
+                    arrival_step = current_steps + total_trip_len
+                    deadline_step = goal["created_at"] + goal["priority"]
+                    lateness = max(0, arrival_step - deadline_step)
+                    
+                    # Pontuação original da viagem
+                    trip_score = -lateness * self.LATENESS_PENALTY_MULTIPLIER - total_trip_len
+
+                    # ===============================================================
+                    # NOVO: Cálculo do Bônus de Oportunidade Futura
+                    # ===============================================================
+                    opportunity_bonus = 0
+                    
+                    # Identifica os pacotes que sobrarão após coletar o pacote atual
+                    remaining_packages = [p for p in world.packages if p != pkg_pos]
+
+                    if remaining_packages:
+                        min_dist_to_next_pkg = float('inf')
+                        # Ponto de chegada desta viagem (local da entrega)
+                        delivery_pos = goal["pos"]
+
+                        # Encontra a distância (heurística) do ponto de entrega até o pacote restante mais próximo
+                        for next_pkg_pos in remaining_packages:
+                            dist = self.heuristic(delivery_pos, next_pkg_pos)
+                            if dist < min_dist_to_next_pkg:
+                                min_dist_to_next_pkg = dist
+                        
+                        # O bônus é inversamente proporcional à distância.
+                        # Quanto mais perto, maior o bônus. (Adicionamos 1 para evitar divisão por zero)
+                        if min_dist_to_next_pkg != float('inf'):
+                            opportunity_bonus = self.OPPORTUNITY_BONUS_WEIGHT / (1 + min_dist_to_next_pkg)
+                    
+                    # Adiciona o bônus à pontuação final da viagem
+                    final_trip_score = trip_score + opportunity_bonus
+                    # ===============================================================
+
+                    if final_trip_score > best_trip_score:
+                        best_trip_score = final_trip_score
+                        best_package_pos = pkg_pos
+
+            return best_package_pos
+            
+        return None
+
+    
+
+# ==========================
+# CLASSE WORLD (MUNDO)
+# ==========================
+class World:
+    def __init__(self, seed=None):
+        if seed is not None:
+            random.seed(seed)
+        # Parâmetros do grid e janela
+        self.maze_size = 30
+        self.width = 600
+        self.height = 600
+        self.block_size = self.width // self.maze_size
+
+        # Cria uma matriz 2D para planejamento de caminhos:
+        # 0 = livre, 1 = obstáculo
+        self.map = [[0 for _ in range(self.maze_size)] for _ in range(self.maze_size)]
+        # Geração de obstáculos com padrão de linha (assembly line)
+        self.generate_obstacles()
+        # Gera a lista de paredes a partir da matriz
+        self.walls = []
+        for row in range(self.maze_size):
+            for col in range(self.maze_size):
+                if self.map[row][col] == 1:
+                    self.walls.append((col, row))
+
+        # Número total de entregas (metas) planejadas ao longo do jogo
+        # 2 iniciais + 1 após 2–5 passos + 3 extras com janelas de 10–15 passos = 6
+        self.total_items = 6
+
+        # Geração dos locais de coleta (pacotes)
+        # Mantemos uma folga de um a mais que o total de entregas
+        self.packages = []
+        while len(self.packages) < self.total_items + 1:
+            x = random.randint(0, self.maze_size - 1)
+            y = random.randint(0, self.maze_size - 1)
+            if self.map[y][x] == 0 and [x, y] not in self.packages:
+                self.packages.append([x, y])
+
+        # Metas (goals) com surgimento ao longo do tempo
+        # Estrutura de cada goal: {"pos":[x,y], "priority":int, "created_at":steps_int}
+        self.goals = []
+
+        # Cria o jogador usando a classe DefaultPlayer (pode ser substituído por outra implementação)
+        self.player = self.generate_player()
+
+        # Inicializa a janela do Pygame
+        pygame.init()
+        self.screen = pygame.display.set_mode((self.width, self.height))
+        pygame.display.set_caption("Delivery Bot")
+
+        # Carrega imagens para pacote e meta a partir de arquivos
+        self.package_image = pygame.image.load("images/cargo.png")
+        self.package_image = pygame.transform.scale(self.package_image, (self.block_size, self.block_size))
+
+        self.goal_image = pygame.image.load("images/operator.png")
+        self.goal_image = pygame.transform.scale(self.goal_image, (self.block_size, self.block_size))
+
+        # Cores utilizadas para desenho (caso a imagem não seja usada)
+        self.wall_color = (100, 100, 100)
+        self.ground_color = (255, 255, 255)
+        self.player_color = (0, 255, 0)
+        self.path_color = (200, 200, 0)
+
+    def generate_obstacles(self):
+        """
+        Gera obstáculos com sensação de linha de montagem:
+         - Cria vários segmentos horizontais curtos com lacunas.
+         - Cria vários segmentos verticais curtos com lacunas.
+         - Cria um obstáculo em bloco grande (4x4 ou 6x6) simulando uma estrutura de suporte.
+        """
+        # Barragens horizontais curtas:
+        for _ in range(7):
+            row = random.randint(5, self.maze_size - 6)
+            start = random.randint(0, self.maze_size - 10)
+            length = random.randint(5, 10)
+            for col in range(start, start + length):
+                if random.random() < 0.7:
+                    self.map[row][col] = 1
+
+        # Barragens verticais curtas:
+        for _ in range(7):
+            col = random.randint(5, self.maze_size - 6)
+            start = random.randint(0, self.maze_size - 10)
+            length = random.randint(5, 10)
+            for row in range(start, start + length):
+                if random.random() < 0.7:
+                    self.map[row][col] = 1
+
+        # Obstáculo em bloco grande: bloco de tamanho 4x4 ou 6x6.
+        block_size = random.choice([4, 6])
+        max_row = self.maze_size - block_size
+        max_col = self.maze_size - block_size
+        top_row = random.randint(0, max_row)
+        top_col = random.randint(0, max_col)
+        for r in range(top_row, top_row + block_size):
+            for c in range(top_col, top_col + block_size):
+                self.map[r][c] = 1
+
+    def generate_player(self):
+        # Cria o jogador em uma célula livre que não seja de pacote ou meta.
+        while True:
+            x = random.randint(0, self.maze_size - 1)
+            y = random.randint(0, self.maze_size - 1)
+            if self.map[y][x] == 0 and [x, y] not in self.packages:
+                return DefaultPlayer([x, y])
+
+    def random_free_cell(self):
+        # Retorna uma célula livre que não colida com paredes, pacotes, jogador ou metas existentes
+        while True:
+            x = random.randint(0, self.maze_size - 1)
+            y = random.randint(0, self.maze_size - 1)
+            occupied = (
+                self.map[y][x] == 1 or
+                [x, y] in self.packages or
+                [x, y] == self.player.position or
+                any(g["pos"] == [x, y] for g in self.goals)
+            )
+            if not occupied:
+                return [x, y]
+
+    def add_goal(self, created_at_step):
+        pos = self.random_free_cell()
+        priority = random.randint(40, 110)
+        self.goals.append({"pos": pos, "priority": priority, "created_at": created_at_step})
+
+    def can_move_to(self, pos):
+        x, y = pos
+        if 0 <= x < self.maze_size and 0 <= y < self.maze_size:
+            return self.map[y][x] == 0
+        return False
+
+    def draw_world(self, path=None):
+        self.screen.fill(self.ground_color)
+        # Desenha os obstáculos (paredes)
+        for (x, y) in self.walls:
+            rect = pygame.Rect(x * self.block_size, y * self.block_size, self.block_size, self.block_size)
+            pygame.draw.rect(self.screen, self.wall_color, rect)
+        # Desenha os locais de coleta (pacotes) utilizando a imagem
+        for pkg in self.packages:
+            x, y = pkg
+            self.screen.blit(self.package_image, (x * self.block_size, y * self.block_size))
+        # Desenha os locais de entrega (metas) utilizando a imagem
+        for goal in self.goals:
+            x, y = goal["pos"]
+            self.screen.blit(self.goal_image, (x * self.block_size, y * self.block_size))
+        # Desenha o caminho, se fornecido
+        if path:
+            for pos in path:
+                x, y = pos
+                rect = pygame.Rect(x * self.block_size + self.block_size // 4,
+                                   y * self.block_size + self.block_size // 4,
+                                   self.block_size // 2, self.block_size // 2)
+                pygame.draw.rect(self.screen, self.path_color, rect)
+        # Desenha o jogador (retângulo colorido)
+        x, y = self.player.position
+        rect = pygame.Rect(x * self.block_size, y * self.block_size, self.block_size, self.block_size)
+        pygame.draw.rect(self.screen, self.player_color, rect)
+        pygame.display.flip()
+
+# ==========================
+# CLASSE MAZE: Lógica do jogo e planejamento de caminhos (A*)
+# ==========================
+class Maze:
+    def __init__(self, seed=None):
+        self.world = World(seed)
+        self.running = True
+        self.score = 0
+        self.steps = 0
+        self.delay = 100  # milissegundos entre movimentos
+        self.path = []
+        self.num_deliveries = 0  # contagem de entregas realizadas
+
+        # Spawn de metas (goals) ao longo do tempo:
+        # 2 metas iniciais no passo 0
+        self.world.add_goal(created_at_step=0)
+
+        # Fila de intervalos para novas metas:
+        # +1 meta após 2–5 passos; +3 metas com intervalos de 10–15 passos entre si
+        self.spawn_intervals = [random.randint(2, 5)] + [random.randint(5, 10)] + [random.randint(10, 15) for _ in range(3)]
+        self.next_spawn_step = self.spawn_intervals.pop(0)  # passo absoluto do próximo spawn
+
+        # O alvo corrente é fixado até ser alcançado (não muda se surgirem novas metas)
+        self.current_target = None
+
+    def heuristic(self, a, b):
+        # Distância de Manhattan
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    def astar(self, start, goal):
+        maze = self.world.map
+        size = self.world.maze_size
+        neighbors = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        close_set = set()
+        came_from = {}
+        gscore = {tuple(start): 0}
+        fscore = {tuple(start): self.heuristic(start, goal)}
+        oheap = []
+        heapq.heappush(oheap, (fscore[tuple(start)], tuple(start)))
+        while oheap:
+            current = heapq.heappop(oheap)[1]
+            if list(current) == goal:
+                data = []
+                while current in came_from:
+                    data.append(list(current))
+                    current = came_from[current]
+                data.reverse()
+                return data
+            close_set.add(current)
+            for dx, dy in neighbors:
+                neighbor = (current[0] + dx, current[1] + dy)
+                tentative_g = gscore[current] + 1
+                if 0 <= neighbor[0] < size and 0 <= neighbor[1] < size:
+                    if maze[neighbor[1]][neighbor[0]] == 1:
+                        continue
+                else:
+                    continue
+                if neighbor in close_set and tentative_g >= gscore.get(neighbor, 0):
+                    continue
+                if tentative_g < gscore.get(neighbor, float('inf')) or neighbor not in [i[1] for i in oheap]:
+                    came_from[neighbor] = current
+                    gscore[neighbor] = tentative_g
+                    fscore[neighbor] = tentative_g + self.heuristic(neighbor, goal)
+                    heapq.heappush(oheap, (fscore[neighbor], neighbor))
+        return []
+
+    def maybe_spawn_goal(self):
+        # Spawna metas conforme a agenda de passos
+        while self.next_spawn_step is not None and self.steps >= self.next_spawn_step:
+            self.world.add_goal(created_at_step=self.steps)
+            if self.spawn_intervals:
+                self.next_spawn_step += self.spawn_intervals.pop(0)
+            else:
+                self.next_spawn_step = None  # sem mais spawns
+
+    def delayed_goals_penalty(self):
+        # Conta quantas metas abertas estouraram sua prioridade
+        delayed = 0
+        for g in self.world.goals:
+            age = self.steps - g["created_at"]
+            if age > g["priority"]:
+                delayed += 1
+        return delayed  # -1 por goal atrasado
+
+    def get_goal_at(self, pos):
+        for g in self.world.goals:
+            if g["pos"] == pos:
+                return g
+        return None
+
+    def idle_tick(self):
+        # Um "passo" sem movimento: avança tempo, aplica penalidades e redesenha
+        self.steps += 1
+        # Custo base por passo
+        self.score -= 1
+        # Penalidade adicional por metas atrasadas
+        self.score -= self.delayed_goals_penalty()
+        # Spawns que podem acontecer neste passo
+        self.maybe_spawn_goal()
+        self.world.draw_world(self.path)
+        pygame.time.wait(self.delay)
+
+    def game_loop(self):
+        # O jogo termina quando o número de entregas realizadas é igual ao total de itens.
+        while self.running:
+            if self.num_deliveries >= self.world.total_items:
+                self.running = False
+                break
+
+            # Spawns podem ocorrer antes mesmo de escolher alvo
+            self.maybe_spawn_goal()
+
+            # Escolhe o alvo apenas quando não há alvo corrente
+            if self.current_target is None:
+                target = self.world.player.escolher_alvo(self.world, self.steps)
+                # Se não há nada para fazer agora, aguardamos (tick ocioso) até surgir algo
+                if target is None:
+                    self.idle_tick()
+                    continue
+                self.current_target = target
+
+            # Planeja caminho até o alvo corrente
+            self.path = self.astar(self.world.player.position, self.current_target)
+            if not self.path:
+                print("Nenhum caminho encontrado para o alvo", self.current_target)
+                self.running = False
+                break
+
+            # Segue o caminho calculado (não muda o alvo durante o trajeto)
+            for pos in self.path:
+                # Move
+                self.world.player.position = pos
+                self.steps += 1
+
+                # Custo base por movimento
+                self.score -= 1
+
+                # Penalidade por metas atrasadas
+                self.score -= self.delayed_goals_penalty()
+
+                # Spawns podem ocorrer durante o trajeto
+                self.maybe_spawn_goal()
+
+                # Desenha
+                self.world.draw_world(self.path)
+                pygame.time.wait(self.delay)
+
+                # Eventos do pygame (fechar janela, etc.)
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        self.running = False
+                        break
+                if not self.running:
+                    break
+
+            if not self.running:
+                break
+
+            # Ao chegar ao alvo, processa a coleta ou entrega:
+            if self.world.player.position == self.current_target:
+                # Se for local de coleta, pega o pacote.
+                if self.current_target in self.world.packages:
+                    self.world.player.cargo += 1
+                    self.world.packages.remove(self.current_target)
+                    print("Pacote coletado em", self.current_target, "Cargo agora:", self.world.player.cargo)
+                else:
+                    # Se for local de entrega e o jogador tiver pelo menos um pacote, entrega.
+                    goal = self.get_goal_at(self.current_target)
+                    if goal is not None and self.world.player.cargo > 0:
+                        self.world.player.cargo -= 1
+                        self.num_deliveries += 1
+                        self.world.goals.remove(goal)
+                        self.score += 50
+                        print(
+                            f"Pacote entregue em {self.current_target} | "
+                            f"Cargo: {self.world.player.cargo} | "
+                            f"Priority: {goal['priority']} | "
+                            f"Age: {self.steps - goal['created_at']}"
+                        )
+
+            # Reset do alvo para permitir nova decisão no próximo ciclo (sem trocar durante o trajeto)
+            self.current_target = None
+
+            # Log simples de estado
+            delayed_count = sum(1 for g in self.world.goals if (self.steps - g["created_at"]) > g["priority"])
+            print(
+                f"Passos: {self.steps}, Pontuação: {self.score}, Cargo: {self.world.player.cargo}, "
+                f"Entregas: {self.num_deliveries}, Goals ativos: {len(self.world.goals)}, "
+                f"Atrasados: {delayed_count}"
+            )
+
+        print("Fim de jogo!")
+        print("Total de passos:", self.steps)
+        print("Pontuação final:", self.score)
+        pygame.quit()
+
+# ==========================
+# PONTO DE ENTRADA PRINCIPAL
+# ==========================
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Delivery Bot: Navegue no grid, colete pacotes e realize entregas."
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Valor do seed para recriar o mesmo mundo (opcional)."
+    )
+    args = parser.parse_args()
+
+    maze = Maze(seed=args.seed)
+    maze.game_loop()
+
