@@ -43,7 +43,7 @@ class DefaultPlayer(BasePlayer):
         # NOVO PARÂMETRO: Peso do bônus de oportunidade.
         # Um valor maior fará o robô priorizar rotas que o deixem perto de outros pacotes.
         # Um bom valor para começar a testar é entre 50 e 200.
-        self.OPPORTUNITY_BONUS_WEIGHT = 100
+        self.OPPORTUNITY_BONUS_WEIGHT = 120
 
     # =======================================================================================
     # NOTE: O A* e a heurística permanecem os mesmos, pois são essenciais para o cálculo
@@ -525,6 +525,7 @@ class Maze:
         print("Fim de jogo!")
         print("Total de passos:", self.steps)
         print("Pontuação final:", self.score)
+        print("A seed do jogo é: " )
         pygame.quit()
 
 # ==========================
