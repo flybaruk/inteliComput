@@ -1,0 +1,3 @@
+As mudanças realizadas consistem na geração da logica sem a nessicidade de gerar a interface grafica do jogo, simultaneamente 
+aplicando um mecanismo timeout para garantir que a compilação não fique travada indefinitivamente em apenas uma seed e por fim salva
+as informações dentro de um arquivo CSV para a analise de resultados
