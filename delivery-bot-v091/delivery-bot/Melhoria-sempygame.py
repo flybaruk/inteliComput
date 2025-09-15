@@ -316,7 +316,7 @@ if __name__ == "__main__":
     )
     # (Todos os argumentos do 'parser' continuam os mesmos)
     parser.add_argument("--simulacoes", type=int, default=1000, help="Número de simulações a serem executadas.")
-    parser.add_argument("--arquivo_saida", type=str, default="simulacao-UM.csv", help="Nome do arquivo CSV de saída.")
+    parser.add_argument("--arquivo_saida", type=str, default="simulacao-aleatoria{}.csv".format(DefaultPlayer(position=(0,0)).OPPORTUNITY_BONUS_WEIGHT), help="Nome do arquivo CSV de saída.")
     parser.add_argument("--seed", type=int, default=None, help="Semente para o gerador de números aleatórios.")
     parser.add_argument('--verbose', action='store_true', help="Imprime logs de status durante a simulação.")
     parser.add_argument('--timeout', type=int, default=15, help="Tempo máximo em segundos que cada simulação pode durar.")
