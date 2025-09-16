@@ -72,7 +72,7 @@ class SmartPlayer(BasePlayer):
     def __init__(self, position):
         super().__init__(position)
         # NOVA CARACTERÍSTICA: Capacidade máxima de carga do robô.
-        self.max_cargo = 2
+        self.max_cargo = 4
 
     def _evaluate_best_goal(self, world, current_steps, maze_solver):
         """
