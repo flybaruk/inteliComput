@@ -175,13 +175,6 @@ class SmartPlayer(BasePlayer):
                 else:
                     print("--> ESCOLHA: Pegar mais um pacote.")
                     return best_pkg
-            # Casos onde apenas uma das opções é viável
-            elif best_goal:
-                print("--> ESCOLHA: Apenas a entrega é viável.")
-                return best_goal["pos"]
-            elif best_pkg:
-                print("--> ESCOLHA: Apenas a coleta é viável.")
-                return best_pkg
         
         # --- Caso padrão: Nenhuma ação válida encontrada ---
         print("DECISÃO: Nenhuma ação válida no momento. Aguardando.")

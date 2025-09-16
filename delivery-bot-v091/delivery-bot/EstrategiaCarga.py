@@ -4,6 +4,7 @@ import heapq
 import sys
 import argparse
 from abc import ABC, abstractmethod
+import math # Importado para usar 'inf'
 
 # ==========================
 # CLASSES DE PLAYER
@@ -34,47 +35,89 @@ class DefaultPlayer(BasePlayer):
         return prioridade - idade
     
     """
-    Implementação padrão do jogador, MODIFICADA para múltiplas cargas.
-    Coleta até 3 pacotes antes de procurar uma entrega.
+    Implementação de um jogador mais inteligente para múltiplas cargas.
+    Agora ele avalia se é melhor coletar ou entregar.
     """
     def escolher_alvo(self, world, current_steps):
         # ================================================================= #
-        # ### INÍCIO DA ALTERAÇÃO: LÓGICA PARA MÚLTIPLAS CARGAS ###
+        # ### INÍCIO DA ALTERAÇÃO: LÓGICA DE DECISÃO INTELIGENTE ###
         # ================================================================= #
         
-        max_cargo = 3  # Define a capacidade máxima de carga do robô
+        max_cargo = 3
         sx, sy = self.position
 
-        # CONDIÇÃO PARA COLETAR:
-        # Se a carga atual for MENOR que a capacidade máxima E houver pacotes disponíveis.
-        if self.cargo < max_cargo and world.packages:
-            print(f"INFO: Carga ({self.cargo}/{max_cargo}) abaixo do máximo. Procurando pacote...")
-            best = None
-            best_dist = float('inf')
+        # --- CASO 1: DEVE COLETAR ---
+        # Se a carga está vazia, a única opção lógica é procurar um pacote.
+        if self.cargo == 0 and world.packages:
+            print(f"INFO: Carga vazia. Procurando o pacote mais próximo...")
+            best_pkg = None
+            best_dist = math.inf
             for pkg in world.packages:
                 d = abs(pkg[0] - sx) + abs(pkg[1] - sy)
                 if d < best_dist:
                     best_dist = d
-                    best = pkg
-            return best
-        
-        # CONDIÇÃO PARA ENTREGAR:
-        # Se o robô tiver QUALQUER carga e houver objetivos disponíveis.
-        # Esta parte do código será executada quando a carga atingir o máximo (3)
-        # ou quando não houver mais pacotes para coletar.
-        elif self.cargo > 0 and world.goals:
-            print(f"INFO: Carga ({self.cargo}/{max_cargo}). Procurando objetivo para entrega...")
-            best = None
-            best_dist = float('inf')
+                    best_pkg = pkg
+            return best_pkg
+
+        # --- CASO 2: DEVE ENTREGAR ---
+        # Se a carga está cheia (ou se não há mais pacotes para pegar), ele deve entregar.
+        elif (self.cargo >= max_cargo or not world.packages) and self.cargo > 0 and world.goals:
+            print(f"INFO: Carga cheia ({self.cargo}/{max_cargo}) ou sem pacotes. Procurando entrega...")
+            best_goal = None
+            best_dist = math.inf
             for goal in world.goals:
                 gx, gy = goal["pos"]
                 d = abs(gx - sx) + abs(gy - sy)
                 if d < best_dist:
                     best_dist = d
-                    best = goal["pos"]
-            return best
+                    best_goal = goal["pos"]
+            return best_goal
+
+        # --- CASO 3: A ESCOLHA ESTRATÉGICA ---
+        # Se ele tem carga (1 ou 2) e AINDA existem pacotes e objetivos, ele decide!
+        elif self.cargo > 0 and world.packages and world.goals:
+            # 1. Encontrar o pacote mais próximo e sua distância
+            best_pkg = None
+            best_dist_pkg = math.inf
+            for pkg in world.packages:
+                d = abs(pkg[0] - sx) + abs(pkg[1] - sy)
+                if d < best_dist_pkg:
+                    best_dist_pkg = d
+                    best_pkg = pkg
+
+            # 2. Encontrar o objetivo mais próximo e sua distância
+            best_goal = None
+            best_dist_goal = math.inf
+            for goal in world.goals:
+                gx, gy = goal["pos"]
+                d = abs(gx - sx) + abs(gy - sy)
+                if d < best_dist_goal:
+                    best_dist_goal = d
+                    best_goal = goal["pos"]
+
+            # 3. Comparar e decidir o que está mais perto
+            print(f"DECISÃO: Comparando... Dist. Pacote: {best_dist_pkg} vs Dist. Objetivo: {best_dist_goal}")
+            if best_dist_pkg <= best_dist_goal:
+                print("--> ESCOLHA: Pegar outro pacote está mais perto.")
+                return best_pkg
+            else:
+                print("--> ESCOLHA: Entregar um pacote está mais perto.")
+                return best_goal
         
-        # Se nenhuma das condições for atendida (ex: sem carga e sem pacotes), não faz nada.
+        # Se chegou até aqui, mas só tem carga e nenhum objetivo, espera.
+        elif self.cargo > 0 and world.goals:
+             print(f"INFO: Carga ({self.cargo}/{max_cargo}) mas sem pacotes restantes. Procurando entrega...")
+             best_goal = None
+             best_dist = math.inf
+             for goal in world.goals:
+                gx, gy = goal["pos"]
+                d = abs(gx - sx) + abs(gy - sy)
+                if d < best_dist:
+                    best_dist = d
+                    best_goal = goal["pos"]
+             return best_goal
+
+        # Se nenhuma das condições for atendida, não faz nada.
         else:
             return None
         
@@ -84,6 +127,7 @@ class DefaultPlayer(BasePlayer):
 
 # ==========================
 # CLASSE WORLD (MUNDO)
+# (O restante do código permanece o mesmo)
 # ==========================
 class World:
     def __init__(self, seed=None):
