@@ -25,152 +25,49 @@ class BasePlayer(ABC):
         """
         pass
 
-#MUDEI A CLASSE TODA PRATICAMENTE
 class DefaultPlayer(BasePlayer):
+
+    # Exemplo de como acessar prioridade de um objetivo
+    # Se idade > prioridade você começa a levar uma multa de -1 por passo por pacote
+    def get_remaining_steps(self, goal, current_steps):
+        prioridade = goal["priority"]
+        idade = current_steps - goal["created_at"]  # para medir o atraso    
+        print(f"Goal em {goal['pos']} tem prioridade {prioridade} e idade {idade}")    
+        return prioridade - idade
     """
-    Uma implementação de jogador ainda mais inteligente que considera:
-    1. A distância real do caminho (usando A*).
-    2. A urgência das entregas, priorizando aquelas próximas do prazo final.
-    3. Planeja a rota completa (pegar pacote -> entregar).
-    4. NOVO: Adiciona um bônus por terminar uma entrega perto de futuros pacotes (visão de futuro).
+    Implementação padrão do jogador.
+    Se não estiver carregando pacotes (cargo == 0), escolhe o pacote mais próximo.
+    Caso contrário, escolhe a meta (entrega) mais próxima.
     """
-
-    def __init__(self, position):
-        super().__init__(position)
-        # Fator de ponderação: quão mais importante é evitar um passo de atraso em relação a um passo de viagem.
-        self.LATENESS_PENALTY_MULTIPLIER = 10
-        
-        # NOVO PARÂMETRO: Peso do bônus de oportunidade.
-        # Um valor maior fará o robô priorizar rotas que o deixem perto de outros pacotes.
-        # Um bom valor para começar a testar é entre 50 e 200.
-        self.OPPORTUNITY_BONUS_WEIGHT = 120
-
-    # =======================================================================================
-    # NOTE: O A* e a heurística permanecem os mesmos, pois são essenciais para o cálculo
-    # dos caminhos reais.
-    # =======================================================================================
-    def heuristic(self, a, b):
-        return abs(a[0] - b[0]) + abs(a[1] - b[1])
-
-    def astar(self, start, goal, world_map):
-        size = len(world_map)
-        neighbors = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-        close_set = set()
-        came_from = {}
-        gscore = {tuple(start): 0}
-        fscore = {tuple(start): self.heuristic(start, goal)}
-        oheap = []
-        heapq.heappush(oheap, (fscore[tuple(start)], tuple(start)))
-        while oheap:
-            current = heapq.heappop(oheap)[1]
-            if list(current) == goal:
-                data = []
-                while current in came_from:
-                    data.append(list(current))
-                    current = came_from[current]
-                return data # Retorna o caminho invertido (sem o ponto inicial)
-            close_set.add(current)
-            for dx, dy in neighbors:
-                neighbor = (current[0] + dx, current[1] + dy)
-                if not (0 <= neighbor[0] < size and 0 <= neighbor[1] < size and world_map[neighbor[1]][neighbor[0]] == 0):
-                    continue
-                
-                tentative_g = gscore[current] + 1
-                if neighbor in close_set and tentative_g >= gscore.get(neighbor, 0):
-                    continue
-
-                if tentative_g < gscore.get(neighbor, float('inf')) or neighbor not in [i[1] for i in oheap]:
-                    came_from[neighbor] = current
-                    gscore[neighbor] = tentative_g
-                    fscore[neighbor] = tentative_g + self.heuristic(neighbor, goal)
-                    heapq.heappush(oheap, (fscore[neighbor], neighbor))
-        return [] # Nenhum caminho encontrado
-
     def escolher_alvo(self, world, current_steps):
-        # Se estiver carregando um pacote, a lógica não muda. O foco é entregar da melhor forma.
-        if self.cargo > 0:
-            best_goal_pos = None
-            best_goal_score = -float('inf')
-
-            for goal in world.goals:
-                path = self.astar(self.position, goal["pos"], world.map)
-                path_len = len(path)
-                if not path:
-                    continue
-
-                arrival_step = current_steps + path_len
-                deadline_step = goal["created_at"] + goal["priority"]
-                lateness = max(0, arrival_step - deadline_step)
-                score = -lateness * self.LATENESS_PENALTY_MULTIPLIER - path_len
-                
-                if score > best_goal_score:
-                    best_goal_score = score
-                    best_goal_pos = goal["pos"]
-            
-            return best_goal_pos
-
-        # Se não estiver carregando, a lógica de decisão agora inclui a visão de futuro.
-        elif self.cargo == 0 and world.packages and world.goals:
-            best_package_pos = None
-            best_trip_score = -float('inf')
-
-            for pkg_pos in world.packages:
-                path_to_pkg = self.astar(self.position, pkg_pos, world.map)
-                path_to_pkg_len = len(path_to_pkg)
-                if not path_to_pkg:
-                    continue
-
+        # Lógica simples 
+        sx, sy = self.position
+        # Se não estiver carregando pacote e houver pacotes disponíveis:
+        if self.cargo == 0 and world.packages:
+            best = None
+            best_dist = float('inf')
+            for pkg in world.packages:
+                d = abs(pkg[0] - sx) + abs(pkg[1] - sy)
+                if d < best_dist:
+                    best_dist = d
+                    best = pkg
+            return best
+        else:
+            # Se estiver carregando ou não houver mais pacotes, vai para a meta de entrega (se existir)
+            if world.goals:
+                best = None
+                best_dist = float('inf')
                 for goal in world.goals:
-                    path_from_pkg_to_goal = self.astar(pkg_pos, goal["pos"], world.map)
-                    path_from_pkg_to_goal_len = len(path_from_pkg_to_goal)
-                    if not path_from_pkg_to_goal:
-                        continue
-
-                    total_trip_len = path_to_pkg_len + path_from_pkg_to_goal_len
-                    arrival_step = current_steps + total_trip_len
-                    deadline_step = goal["created_at"] + goal["priority"]
-                    lateness = max(0, arrival_step - deadline_step)
-                    
-                    # Pontuação original da viagem
-                    trip_score = -lateness * self.LATENESS_PENALTY_MULTIPLIER - total_trip_len
-
-                    # ===============================================================
-                    # NOVO: Cálculo do Bônus de Oportunidade Futura
-                    # ===============================================================
-                    opportunity_bonus = 0
-                    
-                    # Identifica os pacotes que sobrarão após coletar o pacote atual
-                    remaining_packages = [p for p in world.packages if p != pkg_pos]
-
-                    if remaining_packages:
-                        min_dist_to_next_pkg = float('inf')
-                        # Ponto de chegada desta viagem (local da entrega)
-                        delivery_pos = goal["pos"]
-
-                        # Encontra a distância (heurística) do ponto de entrega até o pacote restante mais próximo
-                        for next_pkg_pos in remaining_packages:
-                            dist = self.heuristic(delivery_pos, next_pkg_pos)
-                            if dist < min_dist_to_next_pkg:
-                                min_dist_to_next_pkg = dist
-                        
-                        # O bônus é inversamente proporcional à distância.
-                        # Quanto mais perto, maior o bônus. (Adicionamos 1 para evitar divisão por zero)
-                        if min_dist_to_next_pkg != float('inf'):
-                            opportunity_bonus = self.OPPORTUNITY_BONUS_WEIGHT / (1 + min_dist_to_next_pkg)
-                    
-                    # Adiciona o bônus à pontuação final da viagem
-                    final_trip_score = trip_score + opportunity_bonus
-                    # ===============================================================
-
-                    if final_trip_score > best_trip_score:
-                        best_trip_score = final_trip_score
-                        best_package_pos = pkg_pos
-
-            return best_package_pos
-            
-        return None
-
-    
+                    gx, gy = goal["pos"]
+                    d = abs(gx - sx) + abs(gy - sy)
+                    if d < best_dist:
+                        best_dist = d
+                        best = goal["pos"]
+                
+                steps_for_deadline = self.get_remaining_steps(goal, current_steps)    
+                return best
+            else:
+                return None
 
 # ==========================
 # CLASSE WORLD (MUNDO)
@@ -334,6 +231,9 @@ class World:
 # ==========================
 # CLASSE MAZE: Lógica do jogo e planejamento de caminhos (A*)
 # ==========================
+# ==========================
+# CLASSE MAZE: Lógica do jogo e planejamento de caminhos (A*)
+# ==========================
 class Maze:
     def __init__(self, seed=None):
         self.world = World(seed)
@@ -345,19 +245,17 @@ class Maze:
         self.num_deliveries = 0  # contagem de entregas realizadas
 
         # Spawn de metas (goals) ao longo do tempo:
-        # 2 metas iniciais no passo 0
         self.world.add_goal(created_at_step=0)
-
-        # Fila de intervalos para novas metas:
-        # +1 meta após 2–5 passos; +3 metas com intervalos de 10–15 passos entre si
         self.spawn_intervals = [random.randint(2, 5)] + [random.randint(5, 10)] + [random.randint(10, 15) for _ in range(3)]
-        self.next_spawn_step = self.spawn_intervals.pop(0)  # passo absoluto do próximo spawn
+        self.next_spawn_step = self.spawn_intervals.pop(0)
 
-        # O alvo corrente é fixado até ser alcançado (não muda se surgirem novas metas)
+        # O alvo corrente é fixado até ser alcançado
         self.current_target = None
+        
+        # ADICIONADO: Flag para controlar a espera inicial do robô
+        self.initial_wait_completed = False
 
     def heuristic(self, a, b):
-        # Distância de Manhattan
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
     def astar(self, start, goal):
@@ -398,22 +296,20 @@ class Maze:
         return []
 
     def maybe_spawn_goal(self):
-        # Spawna metas conforme a agenda de passos
         while self.next_spawn_step is not None and self.steps >= self.next_spawn_step:
             self.world.add_goal(created_at_step=self.steps)
             if self.spawn_intervals:
                 self.next_spawn_step += self.spawn_intervals.pop(0)
             else:
-                self.next_spawn_step = None  # sem mais spawns
+                self.next_spawn_step = None
 
     def delayed_goals_penalty(self):
-        # Conta quantas metas abertas estouraram sua prioridade
         delayed = 0
         for g in self.world.goals:
             age = self.steps - g["created_at"]
             if age > g["priority"]:
                 delayed += 1
-        return delayed  # -1 por goal atrasado
+        return delayed
 
     def get_goal_at(self, pos):
         for g in self.world.goals:
@@ -422,63 +318,60 @@ class Maze:
         return None
 
     def idle_tick(self):
-        # Um "passo" sem movimento: avança tempo, aplica penalidades e redesenha
         self.steps += 1
-        # Custo base por passo
         self.score -= 1
-        # Penalidade adicional por metas atrasadas
         self.score -= self.delayed_goals_penalty()
-        # Spawns que podem acontecer neste passo
         self.maybe_spawn_goal()
         self.world.draw_world(self.path)
         pygame.time.wait(self.delay)
+        # Verifica eventos de fechar a janela durante o tick ocioso
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
 
     def game_loop(self):
-        # O jogo termina quando o número de entregas realizadas é igual ao total de itens.
         while self.running:
+            # ADICIONADO: Lógica para a espera inicial de 5 segundos
+            if not self.initial_wait_completed:
+                wait_steps = 3000 // self.delay
+                if self.steps < wait_steps:
+                    self.idle_tick()
+                    # Se o usuário fechar a janela durante a espera, saímos do loop
+                    if not self.running:
+                        break
+                    continue
+                else:
+                    self.initial_wait_completed = True
+                    print("Espera inicial de 5 segundos concluída. Iniciando movimento!")
+
             if self.num_deliveries >= self.world.total_items:
                 self.running = False
                 break
 
-            # Spawns podem ocorrer antes mesmo de escolher alvo
             self.maybe_spawn_goal()
 
-            # Escolhe o alvo apenas quando não há alvo corrente
             if self.current_target is None:
                 target = self.world.player.escolher_alvo(self.world, self.steps)
-                # Se não há nada para fazer agora, aguardamos (tick ocioso) até surgir algo
                 if target is None:
                     self.idle_tick()
                     continue
                 self.current_target = target
 
-            # Planeja caminho até o alvo corrente
             self.path = self.astar(self.world.player.position, self.current_target)
             if not self.path:
                 print("Nenhum caminho encontrado para o alvo", self.current_target)
                 self.running = False
                 break
 
-            # Segue o caminho calculado (não muda o alvo durante o trajeto)
             for pos in self.path:
-                # Move
                 self.world.player.position = pos
                 self.steps += 1
-
-                # Custo base por movimento
                 self.score -= 1
-
-                # Penalidade por metas atrasadas
                 self.score -= self.delayed_goals_penalty()
-
-                # Spawns podem ocorrer durante o trajeto
                 self.maybe_spawn_goal()
-
-                # Desenha
                 self.world.draw_world(self.path)
                 pygame.time.wait(self.delay)
 
-                # Eventos do pygame (fechar janela, etc.)
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         self.running = False
@@ -489,15 +382,12 @@ class Maze:
             if not self.running:
                 break
 
-            # Ao chegar ao alvo, processa a coleta ou entrega:
             if self.world.player.position == self.current_target:
-                # Se for local de coleta, pega o pacote.
                 if self.current_target in self.world.packages:
                     self.world.player.cargo += 1
                     self.world.packages.remove(self.current_target)
                     print("Pacote coletado em", self.current_target, "Cargo agora:", self.world.player.cargo)
                 else:
-                    # Se for local de entrega e o jogador tiver pelo menos um pacote, entrega.
                     goal = self.get_goal_at(self.current_target)
                     if goal is not None and self.world.player.cargo > 0:
                         self.world.player.cargo -= 1
@@ -511,10 +401,7 @@ class Maze:
                             f"Age: {self.steps - goal['created_at']}"
                         )
 
-            # Reset do alvo para permitir nova decisão no próximo ciclo (sem trocar durante o trajeto)
             self.current_target = None
-
-            # Log simples de estado
             delayed_count = sum(1 for g in self.world.goals if (self.steps - g["created_at"]) > g["priority"])
             print(
                 f"Passos: {self.steps}, Pontuação: {self.score}, Cargo: {self.world.player.cargo}, "
@@ -525,7 +412,6 @@ class Maze:
         print("Fim de jogo!")
         print("Total de passos:", self.steps)
         print("Pontuação final:", self.score)
-        print("A seed do jogo é: " )
         pygame.quit()
 
 # ==========================
