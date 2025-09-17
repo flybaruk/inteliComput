@@ -3,6 +3,7 @@ import heapq
 import sys
 import argparse
 from abc import ABC, abstractmethod
+import math
 import csv
 import os
 import multiprocessing
@@ -12,64 +13,106 @@ import queue
 # CLASSES DE PLAYER
 # ==========================
 class BasePlayer(ABC):
+    """
+    Classe base para o jogador (robô).
+    """
     def __init__(self, position):
         self.position = position
         self.cargo = 0
 
     @abstractmethod
-    def escolher_alvo(self, world, current_steps):
+    def escolher_alvo(self, world, current_steps, maze_solver):
+        """
+        Retorna o alvo (posição) que o jogador deseja ir.
+        """
         pass
 
-# <<< LÓGICA DO NOVO AGENTE INSERIDA AQUI >>>
 class DefaultPlayer(BasePlayer):
     """
-    Implementação do jogador com lógica simples baseada em distância de Manhattan.
-    Se não estiver carregando pacotes (cargo == 0), escolhe o pacote mais próximo.
-    Caso contrário, escolhe a meta (entrega) mais próxima.
+    Implementação padrão do jogador (lógica antiga).
     """
-    
-    # Esta função era chamada no código original, mas seu resultado não era usado para decisão.
-    # Mantive a estrutura, mas removi o 'print' para não poluir a saída de milhares de simulações.
-    def get_remaining_steps(self, goal, current_steps):
-        prioridade = goal["priority"]
-        idade = current_steps - goal["created_at"]
-        return prioridade - idade
-
-    def escolher_alvo(self, world, current_steps):
+    def escolher_alvo(self, world, current_steps, maze_solver=None):
         sx, sy = self.position
-        
-        # Se não estiver carregando pacote e houver pacotes disponíveis:
         if self.cargo == 0 and world.packages:
-            best_target = None
+            best = None
             best_dist = float('inf')
             for pkg in world.packages:
                 d = abs(pkg[0] - sx) + abs(pkg[1] - sy)
                 if d < best_dist:
                     best_dist = d
-                    best_target = pkg
-            return best_target
-        # Se estiver carregando ou não houver mais pacotes, vai para a meta de entrega (se existir)
+                    best = pkg
+            return best
         elif self.cargo > 0 and world.goals:
-            best_target = None
+            best = None
             best_dist = float('inf')
-            # Variável para armazenar o goal completo, para chamar get_remaining_steps
-            chosen_goal = None 
             for goal in world.goals:
                 gx, gy = goal["pos"]
                 d = abs(gx - sx) + abs(gy - sy)
                 if d < best_dist:
                     best_dist = d
-                    best_target = goal["pos"]
-                    chosen_goal = goal
+                    best = goal["pos"]
+            return best
+        return None
+
+# #############################################################################
+# ### NOVO: Classe SmartPlayer com a lógica de decisão holística ###
+# #############################################################################
+class SmartPlayer(BasePlayer):
+    """
+    Implementação de um jogador inteligente com planejamento holístico.
+    """
+    def __init__(self, position):
+        super().__init__(position)
+        self.target_package = None
+        self.target_goal = None
+
+    def escolher_alvo(self, world, current_steps, maze_solver):
+        if self.cargo > 0:
+            self.target_package = None 
+            if self.target_goal:
+                return self.target_goal["pos"]
+            else: 
+                return DefaultPlayer.escolher_alvo(self, world, current_steps)
+
+        if self.target_package:
+            return self.target_package
+
+        if self.cargo == 0 and not self.target_package:
+            if not world.packages or not world.goals:
+                return None
+
+            best_score = -math.inf
+            best_plan = {"package": None, "goal": None}
+
+            for package in world.packages:
+                for goal in world.goals:
+                    path_to_pkg = maze_solver.astar(self.position, package)
+                    if not path_to_pkg and self.position != package: continue
+                    dist_to_pkg = len(path_to_pkg)
+                    
+                    path_pkg_to_goal = maze_solver.astar(package, goal["pos"])
+                    if not path_pkg_to_goal and package != goal["pos"]: continue
+                    dist_pkg_to_goal = len(path_pkg_to_goal)
+                        
+                    total_cost_steps = dist_to_pkg + dist_pkg_to_goal
+                    arrival_time_at_goal = current_steps + total_cost_steps
+                    deadline = goal["created_at"] + goal["priority"]
+                    lateness = max(0, arrival_time_at_goal - deadline)
+
+                    reward = 50 
+                    score = reward - total_cost_steps - (lateness * 1.5)
+
+                    if score > best_score:
+                        best_score = score
+                        best_plan["package"] = package
+                        best_plan["goal"] = goal
             
-            # A chamada desta função não afeta a decisão, pois o 'best_target' já foi escolhido.
-            if chosen_goal:
-                self.get_remaining_steps(chosen_goal, current_steps)
-            
-            return best_target
-        else:
-            # Se não há pacotes para pegar nem metas para entregar, não faz nada.
-            return None
+            if best_plan["package"]:
+                self.target_package = best_plan["package"]
+                self.target_goal = best_plan["goal"]
+                return self.target_package
+        
+        return None
 
 # ==========================
 # CLASSE WORLD (MUNDO) - Versão "Headless"
@@ -81,7 +124,6 @@ class World:
         self.maze_size = 30
         self.map = [[0 for _ in range(self.maze_size)] for _ in range(self.maze_size)]
         self.generate_obstacles()
-        self.walls = [(c, r) for r in range(self.maze_size) for c in range(self.maze_size) if self.map[r][c] == 1]
         self.total_items = 6
         self.packages = []
         while len(self.packages) < self.total_items + 1:
@@ -109,7 +151,7 @@ class World:
         while True:
             x, y = random.randint(0, self.maze_size - 1), random.randint(0, self.maze_size - 1)
             if self.map[y][x] == 0 and [x, y] not in self.packages:
-                return DefaultPlayer([x, y])
+                return SmartPlayer([x, y])
 
     def random_free_cell(self):
         while True:
@@ -118,7 +160,9 @@ class World:
             if not occupied: return [x, y]
 
     def add_goal(self, created_at_step):
-        self.goals.append({"pos": self.random_free_cell(), "priority": random.randint(40, 110), "created_at": created_at_step})
+        pos = self.random_free_cell()
+        priority = random.randint(40, 110)
+        self.goals.append({"pos": pos, "priority": priority, "created_at": created_at_step})
 
 # ==========================
 # CLASSE MAZE (Lógica do Jogo)
@@ -130,7 +174,6 @@ class Maze:
         self.running = True
         self.score = 0
         self.steps = 0
-        self.path = []
         self.num_deliveries = 0
         self.world.add_goal(created_at_step=0)
         self.spawn_intervals = [random.randint(2, 5)] + [random.randint(5, 10)] + [random.randint(10, 15) for _ in range(3)]
@@ -169,7 +212,10 @@ class Maze:
     def maybe_spawn_goal(self):
         if self.next_spawn_step is not None and self.steps >= self.next_spawn_step:
             self.world.add_goal(created_at_step=self.steps)
-            self.next_spawn_step += self.spawn_intervals.pop(0) if self.spawn_intervals else float('inf')
+            if self.spawn_intervals:
+                self.next_spawn_step += self.spawn_intervals.pop(0)
+            else:
+                self.next_spawn_step = None
 
     def delayed_goals_penalty(self):
         return sum(1 for g in self.world.goals if self.steps - g["created_at"] > g["priority"])
@@ -191,14 +237,20 @@ class Maze:
             self.maybe_spawn_goal()
 
             if self.current_target is None:
-                self.current_target = self.world.player.escolher_alvo(self.world, self.steps)
+                self.current_target = self.world.player.escolher_alvo(self.world, self.steps, self)
                 if self.current_target is None:
                     self.tick()
                     continue
             
-            self.path = self.astar(self.world.player.position, self.current_target)
-            if not self.path:
-                if self.verbose: print(f"[INFO] Alvo {self.current_target} inacessível. Reposicionando.")
+            path = self.astar(self.world.player.position, self.current_target)
+            
+            if not path and self.world.player.position != self.current_target:
+                if self.verbose: print(f"[INFO] Alvo {self.current_target} inacessível com A*. Reposicionando.")
+                # Limpa o plano do jogador se o alvo se tornar inacessível
+                self.world.player.target_package = None
+                self.world.player.target_goal = None
+                
+                # Lógica para reposicionar o item
                 if self.current_target in self.world.packages:
                     self.world.packages.remove(self.current_target)
                     self.world.packages.append(self.world.random_free_cell())
@@ -206,13 +258,12 @@ class Maze:
                     goal = self.get_goal_at(self.current_target)
                     if goal:
                         self.world.goals.remove(goal)
-                        goal["pos"] = self.world.random_free_cell()
-                        self.world.goals.append(goal)
+                        self.world.add_goal(self.steps)
                 self.current_target = None
                 self.tick()
                 continue
             
-            for pos in self.path:
+            for pos in path:
                 self.world.player.position = pos
                 self.tick()
 
@@ -227,10 +278,13 @@ class Maze:
                         self.num_deliveries += 1
                         self.world.goals.remove(goal)
                         self.score += 50
+                        # Limpa o plano de entrega após a conclusão bem-sucedida
+                        self.world.player.target_goal = None
+                        
                         game_is_not_over = self.num_deliveries < self.world.total_items
                         if not self.world.goals and game_is_not_over:
-                            if self.verbose: print(f"💡 [INFO] Último goal utilizado. Criando um novo para evitar impasse.")
-                            self.world.add_goal(self.steps)
+                             if self.verbose: print(f"💡 [INFO] Último goal utilizado. Criando um novo para evitar impasse.")
+                             self.world.add_goal(self.steps)
             
             self.current_target = None
         
@@ -250,11 +304,11 @@ def run_simulation_worker(seed, verbose, result_queue):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Delivery Bot: Simulação de logística com saída em CSV e timeout.")
-    parser.add_argument("--simulacoes", type=int, default=1000, help="Número de simulações a serem executadas.")
-    parser.add_argument("--arquivo_saida", type=str, default="simulacao-M.csv", help="Nome do arquivo CSV de saída.")
+    parser.add_argument("--simulacoes", type=int, default=150, help="Número de simulações a serem executadas.")
+    parser.add_argument("--arquivo_saida", type=str, default="simulacao-SmartPlayer-Prioridade.csv", help="Nome do arquivo CSV de saída (Agente Holístico com A*).")
     parser.add_argument("--seed", type=int, default=None, help="Semente para o gerador de números aleatórios.")
     parser.add_argument('--verbose', action='store_true', help="Imprime logs de status durante a simulação.")
-    parser.add_argument('--timeout', type=int, default=15, help="Tempo máximo em segundos que cada simulação pode durar.")
+    parser.add_argument('--timeout', type=int, default=60, help="Tempo máximo em segundos que cada simulação pode durar.")
     args = parser.parse_args()
 
     TIMEOUT_SECONDS = args.timeout
@@ -268,7 +322,7 @@ if __name__ == "__main__":
             writer.writeheader()
 
         num_runs = 1 if args.seed is not None else args.simulacoes
-        print(f"Executando {num_runs} simulação(ões). Timeout: {TIMEOUT_SECONDS}s. Saída: '{args.arquivo_saida}'...")
+        print(f"Executando {num_runs} simulação(ões) com HolisticPlayer (A*). Timeout: {TIMEOUT_SECONDS}s. Saída: '{args.arquivo_saida}'...")
 
         for i in range(1, num_runs + 1):
             current_seed = args.seed if args.seed is not None else i
@@ -280,7 +334,7 @@ if __name__ == "__main__":
             simulation_process.join(timeout=TIMEOUT_SECONDS)
 
             if simulation_process.is_alive():
-                print(f"\n⚠️  Simulação {i}/{num_runs} (Seed: {current_seed}) excedeu o tempo limite. Abortando.")
+                print(f"\n⚠️ Simulação {i}/{num_runs} (Seed: {current_seed}) excedeu o tempo limite. Abortando.")
                 simulation_process.terminate()
                 simulation_process.join()
                 writer.writerow({'Id da RUN': i, 'Score': 'N/A', 'Deliveres': 'N/A', 'steps': 'N/A', 'seed': current_seed, 'status': 'timeout'})

@@ -3,13 +3,13 @@ import heapq
 import sys
 import argparse
 from abc import ABC, abstractmethod
-import csv  # Importa a biblioteca para manipulação de CSV
-import os   # Importa para verificar se o arquivo já existe
+import csv
+import os
 import multiprocessing
-import queue # Módulo de fila, para comunicação entre processos
+import queue
 
 # ==========================
-# CLASSES DE PLAYER (sem alterações)
+# CLASSES DE PLAYER
 # ==========================
 class BasePlayer(ABC):
     def __init__(self, position):
@@ -20,93 +20,59 @@ class BasePlayer(ABC):
     def escolher_alvo(self, world, current_steps):
         pass
 
+# <<< LÓGICA DO NOVO AGENTE INSERIDA AQUI >>>
 class DefaultPlayer(BasePlayer):
-    def __init__(self, position):
-        super().__init__(position)
-        self.LATENESS_PENALTY_MULTIPLIER = 10
-        self.OPPORTUNITY_BONUS_WEIGHT = 120
-
-    def heuristic(self, a, b):
-        return abs(a[0] - b[0]) + abs(a[1] - b[1])
-
-    def astar(self, start, goal, world_map):
-        size = len(world_map)
-        neighbors = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-        close_set = set()
-        came_from = {}
-        gscore = {tuple(start): 0}
-        fscore = {tuple(start): self.heuristic(start, goal)}
-        oheap = []
-        heapq.heappush(oheap, (fscore[tuple(start)], tuple(start)))
-        while oheap:
-            current = heapq.heappop(oheap)[1]
-            if list(current) == goal:
-                data = []
-                while current in came_from:
-                    data.append(list(current))
-                    current = came_from[current]
-                return data
-            close_set.add(current)
-            for dx, dy in neighbors:
-                neighbor = (current[0] + dx, current[1] + dy)
-                if not (0 <= neighbor[0] < size and 0 <= neighbor[1] < size and world_map[neighbor[1]][neighbor[0]] == 0):
-                    continue
-                tentative_g = gscore[current] + 1
-                if neighbor in close_set and tentative_g >= gscore.get(neighbor, 0):
-                    continue
-                if tentative_g < gscore.get(neighbor, float('inf')) or neighbor not in [i[1] for i in oheap]:
-                    came_from[neighbor] = current
-                    gscore[neighbor] = tentative_g
-                    fscore[neighbor] = tentative_g + self.heuristic(neighbor, goal)
-                    heapq.heappush(oheap, (fscore[neighbor], neighbor))
-        return []
+    """
+    Implementação do jogador com lógica simples baseada em distância de Manhattan.
+    Se não estiver carregando pacotes (cargo == 0), escolhe o pacote mais próximo.
+    Caso contrário, escolhe a meta (entrega) mais próxima.
+    """
+    
+    # Esta função era chamada no código original, mas seu resultado não era usado para decisão.
+    # Mantive a estrutura, mas removi o 'print' para não poluir a saída de milhares de simulações.
+    def get_remaining_steps(self, goal, current_steps):
+        prioridade = goal["priority"]
+        idade = current_steps - goal["created_at"]
+        return prioridade - idade
 
     def escolher_alvo(self, world, current_steps):
-        if self.cargo > 0:
-            best_goal_pos = None
-            best_goal_score = -float('inf')
+        sx, sy = self.position
+        
+        # Se não estiver carregando pacote e houver pacotes disponíveis:
+        if self.cargo == 0 and world.packages:
+            best_target = None
+            best_dist = float('inf')
+            for pkg in world.packages:
+                d = abs(pkg[0] - sx) + abs(pkg[1] - sy)
+                if d < best_dist:
+                    best_dist = d
+                    best_target = pkg
+            return best_target
+        # Se estiver carregando ou não houver mais pacotes, vai para a meta de entrega (se existir)
+        elif self.cargo > 0 and world.goals:
+            best_target = None
+            best_dist = float('inf')
+            # Variável para armazenar o goal completo, para chamar get_remaining_steps
+            chosen_goal = None 
             for goal in world.goals:
-                path = self.astar(self.position, goal["pos"], world.map)
-                path_len = len(path)
-                if not path: continue
-                arrival_step = current_steps + path_len
-                deadline_step = goal["created_at"] + goal["priority"]
-                lateness = max(0, arrival_step - deadline_step)
-                score = -lateness * self.LATENESS_PENALTY_MULTIPLIER - path_len
-                if score > best_goal_score:
-                    best_goal_score = score
-                    best_goal_pos = goal["pos"]
-            return best_goal_pos
-        elif self.cargo == 0 and world.packages and world.goals:
-            best_package_pos = None
-            best_trip_score = -float('inf')
-            for pkg_pos in world.packages:
-                path_to_pkg = self.astar(self.position, pkg_pos, world.map)
-                if not path_to_pkg: continue
-                path_to_pkg_len = len(path_to_pkg)
-                for goal in world.goals:
-                    path_from_pkg_to_goal = self.astar(pkg_pos, goal["pos"], world.map)
-                    if not path_from_pkg_to_goal: continue
-                    path_from_pkg_to_goal_len = len(path_from_pkg_to_goal)
-                    total_trip_len = path_to_pkg_len + path_from_pkg_to_goal_len
-                    arrival_step = current_steps + total_trip_len
-                    deadline_step = goal["created_at"] + goal["priority"]
-                    lateness = max(0, arrival_step - deadline_step)
-                    trip_score = -lateness * self.LATENESS_PENALTY_MULTIPLIER - total_trip_len
-                    opportunity_bonus = 0
-                    remaining_packages = [p for p in world.packages if p != pkg_pos]
-                    if remaining_packages:
-                        min_dist_to_next_pkg = min([self.heuristic(goal["pos"], p) for p in remaining_packages])
-                        opportunity_bonus = self.OPPORTUNITY_BONUS_WEIGHT / (1 + min_dist_to_next_pkg)
-                    final_trip_score = trip_score + opportunity_bonus
-                    if final_trip_score > best_trip_score:
-                        best_trip_score = final_trip_score
-                        best_package_pos = pkg_pos
-            return best_package_pos
-        return None
+                gx, gy = goal["pos"]
+                d = abs(gx - sx) + abs(gy - sy)
+                if d < best_dist:
+                    best_dist = d
+                    best_target = goal["pos"]
+                    chosen_goal = goal
+            
+            # A chamada desta função não afeta a decisão, pois o 'best_target' já foi escolhido.
+            if chosen_goal:
+                self.get_remaining_steps(chosen_goal, current_steps)
+            
+            return best_target
+        else:
+            # Se não há pacotes para pegar nem metas para entregar, não faz nada.
+            return None
 
 # ==========================
-# CLASSE WORLD (sem alterações)
+# CLASSE WORLD (MUNDO) - Versão "Headless"
 # ==========================
 class World:
     def __init__(self, seed=None):
@@ -160,14 +126,12 @@ class World:
 class Maze:
     def __init__(self, seed=None, verbose=False):
         self.world = World(seed)
-        self.seed = seed
+        self.verbose = verbose
         self.running = True
         self.score = 0
         self.steps = 0
         self.path = []
         self.num_deliveries = 0
-        self.verbose = verbose # Controla se os logs de passo a passo são impressos
-
         self.world.add_goal(created_at_step=0)
         self.spawn_intervals = [random.randint(2, 5)] + [random.randint(5, 10)] + [random.randint(10, 15) for _ in range(3)]
         self.next_spawn_step = self.spawn_intervals.pop(0)
@@ -223,35 +187,27 @@ class Maze:
             if self.num_deliveries >= self.world.total_items:
                 self.running = False
                 break
-
+            
             self.maybe_spawn_goal()
 
             if self.current_target is None:
                 self.current_target = self.world.player.escolher_alvo(self.world, self.steps)
                 if self.current_target is None:
-                    # Se não há alvo, o comportamento correto é simplesmente esperar (tick)
-                    # para que o estado do mundo mude (ex: um novo goal apareça).
-                    # A lógica de impasse anterior foi removida daqui.
                     self.tick()
                     continue
             
             self.path = self.astar(self.world.player.position, self.current_target)
             if not self.path:
-                # Lógica original de reposicionamento (mantida como segurança)
+                if self.verbose: print(f"[INFO] Alvo {self.current_target} inacessível. Reposicionando.")
                 if self.current_target in self.world.packages:
                     self.world.packages.remove(self.current_target)
-                    new_pos = self.world.random_free_cell()
-                    self.world.packages.append(new_pos)
-                    if self.verbose:
-                        print(f"[INFO] Pacote em {self.current_target} inalcançável. Reposicionado em {new_pos}.")
+                    self.world.packages.append(self.world.random_free_cell())
                 else:
                     goal = self.get_goal_at(self.current_target)
                     if goal:
                         self.world.goals.remove(goal)
                         goal["pos"] = self.world.random_free_cell()
                         self.world.goals.append(goal)
-                        if self.verbose:
-                            print(f"[INFO] Goal em {self.current_target} inalcançável. Reposicionado em {goal['pos']}.")
                 self.current_target = None
                 self.tick()
                 continue
@@ -271,37 +227,19 @@ class Maze:
                         self.num_deliveries += 1
                         self.world.goals.remove(goal)
                         self.score += 50
-                        
-                        # 💡 INÍCIO DA CORREÇÃO DEFINITIVA
-                        # Se acabamos de usar o último goal e o jogo ainda não terminou,
-                        # criamos um novo imediatamente para evitar o impasse.
                         game_is_not_over = self.num_deliveries < self.world.total_items
                         if not self.world.goals and game_is_not_over:
-                            if self.verbose:
-                                print(f"💡 [INFO] Último goal utilizado. Criando um novo para evitar impasse.")
+                            if self.verbose: print(f"💡 [INFO] Último goal utilizado. Criando um novo para evitar impasse.")
                             self.world.add_goal(self.steps)
-                        # 💡 FIM DA CORREÇÃO DEFINITIVA
             
-            if self.verbose:
-                print(f"-> Fim do ciclo: Passos: {self.steps}, Pontuação: {self.score}, Carga: {self.world.player.cargo}, Entregas: {self.num_deliveries}")
-
             self.current_target = None
         
-        # Retorna os resultados finais
-        return {
-            "score": self.score,
-            "deliveries": self.num_deliveries,
-            "steps": self.steps
-        }
-# ==========================
-# PONTO DE ENTRADA PRINCIPAL (COM TIMEOUT E CABEÇALHOS CORRIGIDOS)
-# ==========================
+        return {"score": self.score, "deliveries": self.num_deliveries, "steps": self.steps}
 
-# (A função 'run_simulation_worker' continua a mesma de antes)
+# ==========================
+# PONTO DE ENTRADA PRINCIPAL (COM TIMEOUT E CSV)
+# ==========================
 def run_simulation_worker(seed, verbose, result_queue):
-    """
-    Cria e executa uma instância do Maze e coloca o resultado em uma fila.
-    """
     try:
         maze = Maze(seed=seed, verbose=verbose)
         resultados = maze.game_loop()
@@ -311,16 +249,12 @@ def run_simulation_worker(seed, verbose, result_queue):
         result_queue.put(None)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Delivery Bot: Simulação de logística com saída em CSV e timeout."
-    )
-    # (Todos os argumentos do 'parser' continuam os mesmos)
-    parser.add_argument("--simulacoes", type=int, default=1000, help="Número de simulações a serem executadas.")
-    parser.add_argument("--arquivo_saida", type=str, default="simulacao-aleatoria{}.csv".format(DefaultPlayer(position=(0,0)).OPPORTUNITY_BONUS_WEIGHT), help="Nome do arquivo CSV de saída.")
+    parser = argparse.ArgumentParser(description="Delivery Bot: Simulação de logística com saída em CSV e timeout.")
+    parser.add_argument("--simulacoes", type=int, default=150, help="Número de simulações a serem executadas.")
+    parser.add_argument("--arquivo_saida", type=str, default="simulacao-Main.csv", help="Nome do arquivo CSV de saída.")
     parser.add_argument("--seed", type=int, default=None, help="Semente para o gerador de números aleatórios.")
     parser.add_argument('--verbose', action='store_true', help="Imprime logs de status durante a simulação.")
     parser.add_argument('--timeout', type=int, default=15, help="Tempo máximo em segundos que cada simulação pode durar.")
-    
     args = parser.parse_args()
 
     TIMEOUT_SECONDS = args.timeout
@@ -334,17 +268,14 @@ if __name__ == "__main__":
             writer.writeheader()
 
         num_runs = 1 if args.seed is not None else args.simulacoes
-        print(f"Executando {num_runs} simulação(ões). Timeout por simulação: {TIMEOUT_SECONDS}s. Resultados em '{args.arquivo_saida}'...")
+        print(f"Executando {num_runs} simulação(ões). Timeout: {TIMEOUT_SECONDS}s. Saída: '{args.arquivo_saida}'...")
 
         for i in range(1, num_runs + 1):
             current_seed = args.seed if args.seed is not None else i
             print(f"Iniciando simulação {i}/{num_runs} (Seed: {current_seed})...", end='\r')
 
             result_queue = multiprocessing.Queue()
-            simulation_process = multiprocessing.Process(
-                target=run_simulation_worker, 
-                args=(current_seed, args.verbose, result_queue)
-            )
+            simulation_process = multiprocessing.Process(target=run_simulation_worker, args=(current_seed, args.verbose, result_queue))
             simulation_process.start()
             simulation_process.join(timeout=TIMEOUT_SECONDS)
 
@@ -352,37 +283,16 @@ if __name__ == "__main__":
                 print(f"\n⚠️  Simulação {i}/{num_runs} (Seed: {current_seed}) excedeu o tempo limite. Abortando.")
                 simulation_process.terminate()
                 simulation_process.join()
-
-                writer.writerow({
-                    'Id da RUN': i,
-                    'Score': 'N/A',
-                    'Deliveres': 'N/A',
-                    'steps': 'N/A',
-                    'seed': current_seed,
-                    'status': 'timeout'
-                })
+                writer.writerow({'Id da RUN': i, 'Score': 'N/A', 'Deliveres': 'N/A', 'steps': 'N/A', 'seed': current_seed, 'status': 'timeout'})
             else:
                 try:
                     resultados = result_queue.get_nowait()
                     if resultados:
-                        writer.writerow({
-                            'Id da RUN': i,
-                            'Score': resultados['score'],
-                            'Deliveres': resultados['deliveries'],
-                            'steps': resultados['steps'],
-                            'seed': current_seed,
-                            'status': 'completed'
-                        })
+                        writer.writerow({'Id da RUN': i, 'Score': resultados['score'], 'Deliveres': resultados['deliveries'], 'steps': resultados['steps'], 'seed': current_seed, 'status': 'completed'})
                     else:
-                         writer.writerow({
-                            'Id da RUN': i, 'Score': 'N/A', 'Deliveres': 'N/A', 
-                            'steps': 'N/A', 'seed': current_seed, 'status': 'error'
-                        })
+                        writer.writerow({'Id da RUN': i, 'Score': 'N/A', 'Deliveres': 'N/A', 'steps': 'N/A', 'seed': current_seed, 'status': 'error'})
                 except queue.Empty:
                     print(f"\n❌ Erro: Simulação {i}/{num_runs} (Seed: {current_seed}) terminou sem retornar resultados.")
-                    writer.writerow({
-                        'Id da RUN': i, 'Score': 'N/A', 'Deliveres': 'N/A', 
-                        'steps': 'N/A', 'seed': current_seed, 'status': 'crashed'
-                    })
+                    writer.writerow({'Id da RUN': i, 'Score': 'N/A', 'Deliveres': 'N/A', 'steps': 'N/A', 'seed': current_seed, 'status': 'crashed'})
 
     print(f"\n\nConcluído! Os resultados de {num_runs} simulação(ões) foram salvos em '{args.arquivo_saida}'.")
